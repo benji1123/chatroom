@@ -4,7 +4,7 @@ import argparse
 import json
 import socket
 import sys
-import threading
+from threading import Thread
 import time
 import random
 
@@ -110,7 +110,7 @@ class Server:
         try:
             while True:
                 new_client = self.socket.accept()
-                new_thread = threading.Thread(target=self.connection_handler, args=(new_client,))
+                new_thread = Thread(target=self.connection_handler, args=(new_client,))
                 self.thread_list.append(new_thread)
                 print("Connected to the client")
                 new_thread.daemon = True
@@ -126,7 +126,7 @@ class Server:
 
 
 ########################################################################
-# Echo Receiver class
+# Client class
 ########################################################################
 
 CMD_INDEX = 0
@@ -135,9 +135,8 @@ USERNAMES = ["🍋", "🍎", "🥑", "🍄", "🍟"]
 
 class Client:
     RECV_SIZE = 256
-    TTL = 1  # Hops
-    TTL_SIZE = 1  # Bytes
-    TTL_BYTE = TTL.to_bytes(TTL_SIZE, byteorder=BYTE_ORDER)
+    TTL = 1
+    TTL_BYTE = TTL.to_bytes(1, byteorder=BYTE_ORDER)
     TIMEOUT = 2
 
     def __init__(self):
@@ -197,39 +196,42 @@ class Client:
     def chat(self, input_args):
         try:
             multicast_address, multicast_port = self.chatroom_info[self.chatroom_name]
+            ''' see multicast code from `coe4dn4_python_multicast_v02` lecture '''
+            # create UDP socket for SENDING multicast packets
             self.socket_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.socket_udp.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, Client.TTL_BYTE)
+            # create recv socket to RECEIVING multicast packets
+            self.socket_recv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.socket_recv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+            multicast_port = int(multicast_port)
+            self.socket_recv.bind((multicast_address, multicast_port))
+            # issue add group membership request to local multicast router
+            multicast_group_bytes = socket.inet_aton(multicast_address)
+            # use all zeros and let system choose default interface
+            multicast_if_bytes = socket.inet_aton("0.0.0.0")  # default interface
+            # prepare and make multicast request
+            multicast_request = multicast_group_bytes + multicast_if_bytes
+            self.socket_recv.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, multicast_request)
         except Exception as e:
             print(e)
-        try:
-            self.socket_r = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket_r.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
-            multicast_port = int(multicast_port)
-            self.socket_r.bind((multicast_address, multicast_port))
-            multicast_group_bytes = socket.inet_aton(multicast_address)
-            RX_IFACE_ADDRESS = "0.0.0.0"
-            multicast_if_bytes = socket.inet_aton(RX_IFACE_ADDRESS)
-            print("before multicast request")
-            multicast_request = multicast_group_bytes + multicast_if_bytes
-            self.socket_r.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, multicast_request)
-            print("created the second socket")
-        except Exception as msg:
-            print(msg)
         # change command prompt
         print('\n' + '🎉✨️' * 5)
         print(f"Entering chatroom as {self.username}")
-        # Create UDP thread
-        udp_thread_send = threading.Thread(target=self.send_messages_forever, args=(multicast_address, multicast_port))
+        # SEND thread
+        udp_thread_send = Thread(target=self.send_messages_forever, args=(multicast_address, multicast_port))
         self.thread_list.append(udp_thread_send)
         udp_thread_send.start()
-        udp_thread_receive = threading.Thread(target=self.receive_forever)
+        # RECV thread
+        udp_thread_receive = Thread(target=self.receive_forever)
         self.thread_list.append(udp_thread_receive)
         udp_thread_receive.start()
-        # set flag back to zero and go back to console_input
+        # synchronization
         udp_thread_send.join()
         udp_thread_receive.join()
+        # close threads
         self.socket_udp.close()
-        self.socket_r.close()
+        self.socket_recv.close()
+        # go back to (non-chat) console
         self.in_chat = False
         self.get_console_input()
 
@@ -237,10 +239,11 @@ class Client:
         try:
             while True:
                 self.chat_text = input("")
-                print("\033[A                             \033[A")  # re-prints after multicast, so delete this instance
-                multicast_port = int(multicast_port)
-                multicast_address_port = (multicast_address, multicast_port)
+                # delete the prompt/user-input line printed in the console as it is printed again after multicast
+                print("\033[A                             \033[A")
+                multicast_address_port = (multicast_address, int(multicast_port))
                 if self.chat_text == EXIT_CHAT_MSG:
+                    # don't add username to msg
                     self.socket_udp.sendto(EXIT_CHAT_MSG.encode(MSG_ENCODING), multicast_address_port)
                     return
                 else:
@@ -254,8 +257,7 @@ class Client:
     def receive_forever(self):
         try:
             while True:
-                data, address_port = self.socket_r.recvfrom(Client.RECV_SIZE)
-                address, _ = address_port
+                data, address_port = self.socket_recv.recvfrom(Client.RECV_SIZE)
                 msg = data.decode(MSG_ENCODING)
                 if msg == EXIT_CHAT_MSG:
                     print("\n\nLEAVING CHAT\nGOODBYE 👋\n")
